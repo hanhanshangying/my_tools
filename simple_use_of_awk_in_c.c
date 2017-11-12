@@ -11,15 +11,17 @@
 #define AWK_FIELD_OUTOFRANGE    3
 #define AWK_LINE_OUTOFRANGE     4
 #define AWK_OPEN_FAILED         5
-#define AWK_REGCOMP             6
+#define AWK_REGCOMP             -1
+#define AWK_UNMATCH             -2
 
 /*
  * BSD license.
  *
+ * awk related paramters are put in struct awk_st, see the defination. put your private data next to struct awk_st and pack them as the paramter of awk.
  * fun_begin, fun_line and fun_end are the function for when begin , every line and end. if they are unused pass NULL to the function.
- * data are user defined type for private use inside the functions, change the type to what it is in the functions.
- * a pattern string (initialized char array) must be put in the front of data, if pattern is not used, use ""
- * if the user defined type doesn't reserve the space for pattern and give it a proper value, the function may crash. carefully use.
+ * data->data are user defined type for private use inside the functions, change the type to what it is in the functions.
+ * pattern_num must be set and when multipattern the first match is used. if match all, use "". 
+ * pattern and action should be in pairs, if no pattern, pattern_default or pattern[0] should be set.
  * if fields[0] is set to AWK_FIELD0_USED or delim is an empty string, $0 will be saved in fields[0], otherwise $0 will be an empty string.
  * all unused fields are set to empty by default.
  *
@@ -40,9 +42,21 @@
 typedef int (*awk_begin_t)(void *data);
 typedef int (*awk_action_t)(int row_idx, char *fields[], int num_of_fields, void *data);
 typedef void (*awk_end_t)(int row_idx, char *fields[], int num_of_fields, void *data);
-int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_action_t fun_action, awk_end_t fun_end, void *data);
+struct awk_st
+{
+#define PATTERN_NUM 3
+#define PATTERN_SIZE 16
+    int pattern_num;
+    char pattern[PATTERN_NUM][PATTERN_SIZE];
+    awk_begin_t fun_begin;
+    awk_end_t fun_end;
+    char action_default[0];
+    awk_action_t actions[PATTERN_NUM];
+    char data[0];
+};
+int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, struct awk_st *_data);
     /* modify it before use */
-int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_action_t fun_action,  awk_end_t fun_end, void *data);
+int awk(const char *filename, const char *delim, struct awk_st *_data);
 const char *awk_error(int err);
 #define AWK_FIELD0_USED (void*)-1
 
@@ -79,24 +93,38 @@ const char *awk_error(int err)
         ret;\
     })
 
-int awk_match(const char *pattern, const char *line)
+/* match the first */
+int awk_match(struct awk_st *data, const char *line)
 {
-    int ret;
-    regex_t preg;
-    regmatch_t  pmatch[1];
+    int i;
+    int pattern_num = data->pattern_num;
 
-    if(regcomp(&preg, pattern, 0) != 0)
-        return AWK_REGCOMP;
+    if(pattern_num == 0)    /* use default action */
+        return 0;
 
-    ret = regexec(&preg, line, 1, pmatch, 0);
+    for (i = 0; i < pattern_num; ++i) {
+        int ret;
+        regex_t preg;
+        regmatch_t  pmatch[1];
 
-    //size_t regerror(int errcode, const regex_t *preg, char *errbuf,
-    //       size_t errbuf_size);
+        if(data->pattern[i] && data->pattern[i][0] == 0)    /* "" match all line */
+            return i;
 
-    regfree(&preg);
-    return ret == 0;
+        if(regcomp(&preg, data->pattern[i], 0) != 0)
+            return AWK_REGCOMP;
+
+        ret = regexec(&preg, line, 1, pmatch, 0);
+
+        //size_t regerror(int errcode, const regex_t *preg, char *errbuf,
+        //       size_t errbuf_size);
+
+        regfree(&preg);
+        if(ret == 0)
+            return  i;
+    }
+    return AWK_UNMATCH;
 }
-int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_action_t fun_action, awk_end_t fun_end, void *data)
+int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fields[], int fieldnum, struct awk_st *_data)
 {
 #define ADD_FIELD(found) \
         if(found)\
@@ -106,6 +134,12 @@ int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fiel
             fields[field_idx++]=&line[i];\
             found = 0;\
         }while(0)
+
+    awk_begin_t fun_begin = _data->fun_begin;
+    awk_end_t fun_end = _data->fun_end;
+    awk_action_t *actions = _data->actions;
+    void *data = _data->data;
+    
 
     int row_idx = 0;
     int i, field_idx, found, field0_used;
@@ -131,8 +165,14 @@ int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fiel
     errno = 0;
     while(fgets(line, linesize, stream) || errno == EINTR)
     {
-        if(!awk_match(data, line))
-            continue;
+        int act_idx;
+        if((act_idx=awk_match(_data, line)) < 0)
+        {
+            if(act_idx == AWK_UNMATCH)
+                continue;
+            return act_idx;     /* error number */
+        }
+        awk_action_t fun_action = actions[act_idx];
         if(errno == EINTR)
         {
             errno = 0;
@@ -190,20 +230,20 @@ int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fiel
     return AWK_OK;
 }
 
-int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_action_t fun_action, awk_end_t fun_end, void *data)
+int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, struct awk_st *_data)
 {
     int ret;
-    ret = call_with_inputfile(filename, awk__, delim, line, linesize, fields, fieldnum, fun_begin, fun_action, fun_end, data);
+    ret = call_with_inputfile(filename, awk__, delim, line, linesize, fields, fieldnum, _data);
     if(ret < 0)
         return AWK_OPEN_FAILED;
     return ret;
 }
-int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_action_t fun_action,  awk_end_t fun_end, void *data)
+int awk(const char *filename, const char *delim, struct awk_st *_data)
 {
     char line[5120];
     char *fields[10];
     fields[0] = AWK_FIELD0_USED;
-    return awk_(filename, delim, line, sizeof line, fields, sizeof fields/sizeof fields[0], fun_begin, fun_action, fun_end, data);
+    return awk_(filename, delim, line, sizeof line, fields, sizeof fields/sizeof fields[0], _data);
 }
 
 
@@ -219,8 +259,7 @@ int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_acti
 
 struct buf_st
 {
-    char pattern[32];
-    char buf[10240];
+    char buf[1024];
     int i;
     int ret;
 };
@@ -229,8 +268,6 @@ int func_begin(void *data)
     struct buf_st *buf = data;
     int i, ret;
     i = buf->i;
-    if(sizeof buf->buf - i <= 0)
-        return AWK_BREAK;
     ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "users are: \n");
     if(ret < 0)
     {
@@ -238,6 +275,11 @@ int func_begin(void *data)
         return AWK_BREAK;
     }
     buf->i += ret;
+    if(buf->i >= sizeof buf->buf)
+    {
+        buf->i = sizeof buf->buf;
+        return AWK_BREAK;
+    }
     return AWK_CONTINUE;
 }
 void func_end(int row_idx, char *fields[], int num_of_fields, void *data)
@@ -247,8 +289,6 @@ void func_end(int row_idx, char *fields[], int num_of_fields, void *data)
     i = buf->i;
     (void)fields;
     (void)num_of_fields;
-    if(sizeof buf->buf - i <= 0)
-        return;
     ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "\n total num: %d\n", row_idx);
     if(ret < 0)
     {
@@ -256,6 +296,10 @@ void func_end(int row_idx, char *fields[], int num_of_fields, void *data)
         return;
     }
     buf->i += ret;
+    if(buf->i >= sizeof buf->buf)
+    {
+        buf->i = sizeof buf->buf;
+    }
     buf->ret = 0;
 }
 int func_action(int row_idx, char *fields[], int num_of_fields, void *data)
@@ -264,8 +308,6 @@ int func_action(int row_idx, char *fields[], int num_of_fields, void *data)
     int i, ret;
     (void) num_of_fields;
     i = buf->i;
-    if(sizeof buf->buf - i <= 0)
-        return AWK_BREAK;
     ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "\t %d. %s %s\n", row_idx, fields[1], fields[0]);
     if(ret < 0)
     {
@@ -273,19 +315,36 @@ int func_action(int row_idx, char *fields[], int num_of_fields, void *data)
         return AWK_BREAK;
     }
     buf->i += ret;
+    if(buf->i >= sizeof buf->buf)
+    {
+        buf->i = sizeof buf->buf;
+        return AWK_BREAK;
+    }
     return AWK_CONTINUE;
 }
 
 void example(void)
 {
-    struct buf_st buf = {{0}};
-    strcpy(buf.pattern, "d*.nal");
-    int ret = awk("/etc/passwd", ":", func_begin, func_action, func_end, &buf);
+    struct buf_all
+    {
+        struct awk_st awk;
+        struct buf_st buf;
+    };
+    struct buf_all buf = {{0}};
+
+    buf.awk.pattern_num = 2;
+    strcpy(buf.awk.pattern[0], "d*.nal");
+    strcpy(buf.awk.pattern[1], "root");
+    buf.awk.fun_begin = func_begin;
+    buf.awk.fun_end = func_end;
+    buf.awk.actions[0] = func_action;
+    buf.awk.actions[1] = func_action;
+    int ret = awk("/etc/passwd", ":", (struct awk_st*)&buf);
     if(ret != AWK_OK)
     {
         fprintf(stderr, "awk wrong:%s\n", awk_error(ret));
     }
-    fprintf(stdout, "%s", buf.buf);
+    fprintf(stdout, "%s", buf.buf.buf);
 }
 int main(void)
 {
