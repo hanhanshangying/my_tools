@@ -37,6 +37,8 @@
  * Note: the return value that the caller wanted should be stored in data.
  *       what fun_begin and func_line return are just for awk, and what awk return is only used for reporting awk errors.
  *
+ * some replace function for string are provided, see the definations.
+ *
  */
 
 typedef int (*awk_begin_t)(void *data);
@@ -54,11 +56,18 @@ struct awk_st
     awk_action_t actions[PATTERN_NUM];
     char data[0];
 };
+
+#define AWK_FIELD0_USED (void*)-1
 int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, struct awk_st *_data);
     /* modify it before use */
 int awk(const char *filename, const char *delim, struct awk_st *_data);
 const char *awk_error(int err);
-#define AWK_FIELD0_USED (void*)-1
+
+/* not found also return 0 */
+int awk_str_replace_inplace(char *src, const char *old, const char *new);
+int awk_str_replace(const char *src, const char *old, const char *new, char buf[], int bufsize);
+int awk_str_replace_regex(const char *src, const char *pattern, const char *new, char buf[], int bufsize);
+int awk_str_replace_regex_inplace(char *src, const char *pattern, const char *new);
 
 
 
@@ -79,6 +88,102 @@ const char *awk_error(int err)
     }
 }
 
+/* not found also return 0 */
+int awk_str_replace_inplace(char *src, const char *old, const char *new)
+{
+    int old_len = strlen(old);
+    int new_len = strlen(new);
+    char *begin;
+
+    if(new_len > old_len)
+        return -1;
+
+    begin = strstr(src, old);
+    if(begin == NULL)
+        return 0;
+
+    memcpy(begin, new, new_len);
+    if(new_len != old_len)
+        strcpy(&begin[new_len], &begin[old_len]);
+
+    return 0;
+}
+
+/* not found also return 0 */
+int awk_str_replace(const char *src, const char *old, const char *new, char buf[], int bufsize)
+{
+    int srclen = strlen(src);
+    int old_len = strlen(old);
+    int new_len = strlen(new);
+    char *begin;
+
+    if(srclen-old_len+new_len+1 > bufsize)
+        return -1;
+
+    begin = strstr(src, old);
+    if(begin == NULL)
+        return 0;
+
+    memcpy(buf, src, begin-src);
+    memcpy(&buf[begin-src], new, new_len);
+    memcpy(&buf[begin-src+new_len], begin+old_len, srclen+1-old_len-(begin-src));
+    return 0;
+}
+
+/* not found also return 0 */
+int awk_str_replace_regex(const char *src, const char *pattern, const char *new, char buf[], int bufsize)
+{
+    regex_t preg;
+    regmatch_t  pmatch[1];
+    int srclen = strlen(src);
+    int new_len = strlen(new);
+
+    if(regcomp(&preg, pattern, 0|REG_EXTENDED) != 0)
+        return -2;
+
+    int ret = regexec(&preg, src, 1, pmatch, 0);
+    regfree(&preg);
+    if(ret != 0)
+    {
+        return 0;
+    }
+
+    if(srclen-(pmatch[0].rm_eo - pmatch[0].rm_so)+new_len+1 > bufsize)
+        return -1;
+
+    memcpy(buf, src, pmatch[0].rm_so);
+    memcpy(&buf[pmatch[0].rm_so], new, new_len);
+    memcpy(&buf[pmatch[0].rm_so+new_len], src+pmatch[0].rm_eo, srclen+1-pmatch[0].rm_eo);
+
+    return 0;
+}
+/* not found also return 0 */
+int awk_str_replace_regex_inplace(char *src, const char *pattern, const char *new)
+{
+    regex_t preg;
+    regmatch_t  pmatch[1];
+    int new_len = strlen(new);
+
+    if(regcomp(&preg, pattern, 0|REG_EXTENDED) != 0)
+        return -2;
+
+    int ret = regexec(&preg, src, 1, pmatch, 0);
+    regfree(&preg);
+    if(ret != 0)
+    {
+        return 0;
+    }
+
+    if(new_len > pmatch[0].rm_eo - pmatch[0].rm_so)
+        return -1;
+
+    memcpy(src+pmatch[0].rm_so, new, new_len);
+
+    if(new_len != pmatch[0].rm_eo - pmatch[0].rm_so)
+        strcpy(src+pmatch[0].rm_so+new_len, src+pmatch[0].rm_eo);
+
+    return 0;
+}
 
 #define call_with_inputfile(filename, f, argv...) \
     ({\
@@ -110,7 +215,7 @@ int awk_match(struct awk_st *data, const char *line)
         if(data->pattern[i] && data->pattern[i][0] == 0)    /* "" match all line */
             return i;
 
-        if(regcomp(&preg, data->pattern[i], 0) != 0)
+        if(regcomp(&preg, data->pattern[i], 0|REG_EXTENDED) != 0)
             return AWK_REGCOMP;
 
         ret = regexec(&preg, line, 1, pmatch, 0);
