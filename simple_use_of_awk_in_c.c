@@ -13,14 +13,18 @@
 /*
  * BSD license.
  *
- * fun_begin, fun_line and fun_end are the function for when begin , every line and end.
+ * fun_begin, fun_line and fun_end are the function for when begin , every line and end. if they are unused pass NULL to the function.
  * data are user defined type for private use inside the functions, change the type to what it is in the functions.
+ * if fields[0] is set to AWK_FIELD0_USED or delim is an empty string, $0 will be saved in fields[0], otherwise $0 will be an empty string.
+ * all unused fields are set to empty by default.
  *
  * fun_end return none value, while the fun_begin and fun_line
  * return AWK_CONTINUE to continue, return AWK_BREAK to stop excution.
+ * fun_end is always excuted even when meets AWK_BREAK.
  *
  * if success awk return AWK_OK, otherwise an errno that can be reported by awk_errno is returned.
  *
+ * the temporary fields and line will be unavaliable if they are in an stack and when the stack is unavaliable.
  * modify line and fields to satify your use, an example is appended to the code.
  *
  * Note: the return value that the caller wanted should be stored in data.
@@ -30,10 +34,13 @@
  */
 
 typedef int (*awk_begin_t)(void *data);
-typedef int (*awk_line_t)(int row_idx, char *fields[], int num_of_fields, void *data);
+typedef int (*awk_action_t)(int row_idx, char *fields[], int num_of_fields, void *data);
 typedef void (*awk_end_t)(int row_idx, char *fields[], int num_of_fields, void *data);
-int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_line_t fun_line,  awk_end_t fun_end, void *data);
+int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_action_t fun_action, awk_end_t fun_end, void *data);
+    /* modify it before use */
+int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_action_t fun_action,  awk_end_t fun_end, void *data);
 const char *awk_error(int err);
+#define AWK_FIELD0_USED (void*)-1
 
 
 
@@ -65,7 +72,7 @@ const char *awk_error(int err)
         ret;\
     })
 
-int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_line_t fun_line, awk_end_t fun_end, void *data)
+int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_action_t fun_action, awk_end_t fun_end, void *data)
 {
 #define ADD_FIELD(found) \
         if(found)\
@@ -77,55 +84,100 @@ int awk__(FILE *stream, const char *delim, char line[], int linesize, char *fiel
         }while(0)
 
     int row_idx = 0;
-    int i, field_idx, found;
+    int i, field_idx, found, field0_used;
 
-    if(fun_begin(data) != AWK_CONTINUE)
-        return AWK_OK;
+    if(fieldnum < 1)                    /* at least one field */
+        return AWK_FIELD_OUTOFRANGE;
 
+    if(fun_begin)
+    {
+        if(fun_begin(data) != AWK_CONTINUE)
+            return AWK_OK;
+    }
+
+    if(fields[0] == AWK_FIELD0_USED || *delim == 0)
+        field0_used = 1;
+    else
+        field0_used = 0;
+
+    for (i = 0; i < fieldnum; ++i) {
+        static char *empty="";
+        fields[i] = empty;
+    }
     errno = 0;
     while(fgets(line, linesize, stream) || errno == EINTR)
     {
         if(errno == EINTR)
-            continue;
-
-        for(i = 0,field_idx = 0, found=1; i < linesize
-                && line[i] != '\n' && line[i] != 0; i++)
         {
-            ADD_FIELD(found);
-            if(strchr(delim, line[i]))
-            {
-                line[i] = 0;
-                found = 1;
-            }
+            errno = 0;
+            continue;
         }
-        if(i == linesize)
-            return AWK_LINE_OUTOFRANGE;
-        line[i] = 0; // if '\n', -> '\0'
-        ADD_FIELD(found);
 
-        if(fun_line(row_idx, fields, field_idx, data) != AWK_CONTINUE)
-            return AWK_OK;
+        for (i = 0; i < fieldnum; ++i) {
+            static char *empty="";
+            fields[i] = empty;
+        }
+        field_idx = 1; 
+        if(*delim)
+        {
+            if(field0_used)
+            {
+                int l = strlen(line);
+                if((l*2) > linesize-2)
+                    return AWK_LINE_OUTOFRANGE;
+                fields[0] = &line[l+1];
+                strcpy(fields[0], &line[0]);
+            }
+            for(i = 0,found=1; i < linesize
+                    && line[i] != '\n' && line[i] != 0; i++)
+            {
+                ADD_FIELD(found);
+                if(strchr(delim, line[i]))
+                {
+                    line[i] = 0;
+                    found = 1;
+                }
+            }
+            if(i == linesize)
+                return AWK_LINE_OUTOFRANGE;
+            line[i] = 0; // if '\n', -> '\0'
+            ADD_FIELD(found);
+        }
+        else
+        {
+            fields[0] = line;
+        }
+
+        if(fun_action)
+        {
+            if(fun_action(row_idx, fields, field_idx, data) != AWK_CONTINUE)
+                return AWK_OK;
+        }
 
         row_idx++;
     }
 
-    fun_end(row_idx, fields, field_idx, data);
+    if(fun_end)
+    {
+        fun_end(row_idx, fields, field_idx, data);
+    }
     return AWK_OK;
 }
 
-int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_line_t fun_line, awk_end_t fun_end, void *data)
+int awk_(const char *filename, const char *delim, char line[], int linesize, char *fields[], int fieldnum, awk_begin_t fun_begin, awk_action_t fun_action, awk_end_t fun_end, void *data)
 {
     int ret;
-    ret = call_with_inputfile(filename, awk__, delim, line, linesize, fields, fieldnum, fun_begin, fun_line, fun_end, data);
+    ret = call_with_inputfile(filename, awk__, delim, line, linesize, fields, fieldnum, fun_begin, fun_action, fun_end, data);
     if(ret < 0)
         return AWK_OPEN_FAILED;
     return ret;
 }
-int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_line_t fun_line,  awk_end_t fun_end, void *data)
+int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_action_t fun_action,  awk_end_t fun_end, void *data)
 {
-    char line[512];
+    char line[5120];
     char *fields[10];
-    return awk_(filename, delim, line, sizeof line, fields, sizeof fields, fun_begin, fun_line, fun_end, data);
+    fields[0] = AWK_FIELD0_USED;
+    return awk_(filename, delim, line, sizeof line, fields, sizeof fields/sizeof fields[0], fun_begin, fun_action, fun_end, data);
 }
 
 
@@ -135,11 +187,13 @@ int awk(const char *filename, const char *delim, awk_begin_t fun_begin, awk_line
 
 
 
-/* below is an example of how to use */
+/* below is an example of how to use
+ * it will print the $1 and $0 of each line in /etc/passwd with delim : */
+
 /*
 struct buf_st
 {
-    char buf[1024];
+    char buf[10240];
     int i;
     int ret;
 };
@@ -148,6 +202,8 @@ int func_begin(void *data)
     struct buf_st *buf = data;
     int i, ret;
     i = buf->i;
+    if(sizeof buf->buf - i <= 0)
+        return AWK_BREAK;
     ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "users are: \n");
     if(ret < 0)
     {
@@ -164,6 +220,8 @@ void func_end(int row_idx, char *fields[], int num_of_fields, void *data)
     i = buf->i;
     (void)fields;
     (void)num_of_fields;
+    if(sizeof buf->buf - i <= 0)
+        return;
     ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "\n total num: %d\n", row_idx);
     if(ret < 0)
     {
@@ -173,13 +231,15 @@ void func_end(int row_idx, char *fields[], int num_of_fields, void *data)
     buf->i += ret;
     buf->ret = 0;
 }
-int func_line(int row_idx, char *fields[], int num_of_fields, void *data)
+int func_action(int row_idx, char *fields[], int num_of_fields, void *data)
 {
     struct buf_st *buf = data;
     int i, ret;
     (void) num_of_fields;
     i = buf->i;
-    ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "\t %d. %s\n", row_idx, fields[0]);
+    if(sizeof buf->buf - i <= 0)
+        return AWK_BREAK;
+    ret = snprintf(&buf->buf[i], sizeof buf->buf - i, "\t %d. %s %s\n", row_idx, fields[1], fields[0]);
     if(ret < 0)
     {
         buf->ret = ret;
@@ -192,7 +252,7 @@ int func_line(int row_idx, char *fields[], int num_of_fields, void *data)
 void example(void)
 {
     struct buf_st buf = {{0}};
-    int ret = awk("/etc/passwd", ":", func_begin, func_line, func_end, &buf);
+    int ret = awk("/etc/passwd", ":", func_begin, func_action, func_end, &buf);
     if(ret != AWK_OK)
     {
         fprintf(stderr, "awk wrong:%s\n", awk_error(ret));
@@ -204,4 +264,5 @@ int main(void)
     example();
     return 0;
 }
+
 */
