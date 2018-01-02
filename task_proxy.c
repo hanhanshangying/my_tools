@@ -20,9 +20,9 @@
 
 #define ARGV_MAX 16
 
-#define MARK fprintf(stderr, "%s \n", __func__);
 
 /*
+ * BSD License
  * request must start with CMD, end with \0, parameters separated with DELIM
  * NRET means return immediately, excute background
  * PIPE means receive the output of the task
@@ -68,12 +68,10 @@ int epollfd;
 
 struct taskbuf *task_getbuf(i)
 {
-    MARK
     return task_buf[i];
 }
 struct taskbuf *task_allocbuf(i)
 {
-    MARK
 #ifndef NDEBUG
     fprintf(stderr, "task alloc\n");
     if(task_buf[i] != NULL)
@@ -89,7 +87,6 @@ struct taskbuf *task_allocbuf(i)
 }
 void task_freebuf(i)
 {
-    MARK
     if(task_buf[i])
     {
         free(task_buf[i]);
@@ -99,7 +96,6 @@ void task_freebuf(i)
 
 void task_prepare(void)
 {
-    MARK
     int i;
     for (i = 0; i < MAX_TASKS; ++i) {
         task_pids[i] = -i-1;
@@ -116,7 +112,6 @@ void task_prepare(void)
    use with task_put in pairs like malloc and free */
 int task_get(void)
 {
-    MARK
     int i = -avaliable_list;
 
     if(i == MAX_TASKS)      /* not exist, no free node */
@@ -125,15 +120,11 @@ int task_get(void)
     avaliable_list = task_pids[i];
     task_socks[i] = -1;
     task_count++;
-   // if(task_count > MAX_TASKS/2)
-    //    fprintf(stderr, "Warning: task_count=%d, pid_count=%d\n", task_count, pid_count);
-    fprintf(stderr, "Warning: task_count=%d, pid_count=%d get i=%d\n", task_count, pid_count, i);
     return i;
 }
 /* add a node back to the free list */
 void task_put(int i)
 {
-    MARK
     task_count--;
     task_pids[i] = avaliable_list;
     avaliable_list = -i;
@@ -142,12 +133,10 @@ void task_put(int i)
     task_socks[i] = -1;
     if(task_buf[i])
         task_freebuf(i);
-    fprintf(stderr, "Warning: task_count=%d, pid_count=%d put i=%d\n", task_count, pid_count, i);
 }
 /* find the node by pid */
 int task_find(pid_t pid)
 {
-    MARK
     int i;
     for (i = 0; i < MAX_TASKS; ++i) {
         if(task_pids[i] == pid)
@@ -166,7 +155,6 @@ int task_find(pid_t pid)
 /* split the request string into argv for execvp */
 void split_request(char buf[], int l, char *argv[], int argc)
 {
-    MARK
     int i, j;
     for (i = 0, j = 0; i < l && j < argc-1; ++i) {
         if(buf[i] == DELIM)
@@ -190,7 +178,6 @@ void split_request(char buf[], int l, char *argv[], int argc)
 }
 void exec_process(int fd, int type, char buf[], int len)
 {
-    MARK
     char *argv[ARGV_MAX];
 
     close(fd);  /* write nothing, so close it immediately */
@@ -200,7 +187,6 @@ void exec_process(int fd, int type, char buf[], int len)
 }
 void pipe_process(int fd, int type, char buf[], int len)
 {
-    MARK
     char *argv[ARGV_MAX];
 
     split_request(buf, len, argv, ARGV_MAX);
@@ -214,9 +200,7 @@ void pipe_process(int fd, int type, char buf[], int len)
 
 void after_wait(pid_t pid, int status)
 {
-    MARK
     pid_count--;
-    fprintf(stderr, "after wait task_count=%d, pid_count=%d pid=%d\n", task_count, pid_count, pid);
     int i = task_find(pid);
     if(i >= 0)
     {
@@ -229,8 +213,6 @@ void after_wait(pid_t pid, int status)
             int ret = write(task_socks[i], buf, sizeof RETURN_MARK -1 + sizeof s32);
             if(ret < 0)
                 perror("after_wait write");
-            //    close(task_socks[i]);
-            //   task_socks[i] = -1;
         }
         task_put(i);
     }
@@ -238,7 +220,6 @@ void after_wait(pid_t pid, int status)
 
 int client_readbuf(int cl, char buf[], int size)
 {
-    MARK
     int l = 0;
     int ret;
 
@@ -273,19 +254,15 @@ int client_readbuf(int cl, char buf[], int size)
         fprintf(stderr, "request too long\n");
         return -1;
     }
-    fprintf(stderr, "client read buf return %d\n", l);
     return l;
 }
 
 void client_after_read(int i, char buf[], int l)
 {
-    MARK
-        fprintf(stderr, "----------------------l=%d\n", l);
     int cl = task_socks[i];
     if(l < CMDLEN+1)
     {
         task_put(i);
-        //close(cl);
         return;
     }
    
@@ -319,9 +296,8 @@ void client_after_read(int i, char buf[], int l)
     else
     {
         buf[l-1] = 0;
-        fprintf(stderr, "wrong request(print without last byte):%s\n", buf);
         task_put(i);
-        //close(cl);
+        fprintf(stderr, "wrong request(print without last byte):%s\n", buf);
         return;
     }
 
@@ -329,7 +305,6 @@ void client_after_read(int i, char buf[], int l)
     if(pid < 0)
     {
         task_put(i);
-        //close(cl);
         perror("client_after_read fork");
         return;
     }
@@ -338,12 +313,10 @@ void client_after_read(int i, char buf[], int l)
         pid_count++;
         task_freebuf(i);
         task_pids[i] = pid;
-        fprintf(stderr, "after fork pid_count=%d task_count=%d pid=%d i =%d\n", pid_count, task_count, pid, i);
         switch(type)
         {
             case EXECID:
                 /* close it after wait to write the status of the child to the client */
-                // task_socks[i] = cl;
                 break;
             case NRETID:
             case PIPEID:
@@ -366,9 +339,7 @@ void client_after_read(int i, char buf[], int l)
 }
 void client_process(int i)
 {
-    MARK
     int cl = task_socks[i];
-    fprintf(stderr, "fd = %d i=%d\n", cl, i);
     struct taskbuf *buf = task_getbuf(i);
     if(buf == NULL)     /* mostly, in stack is enough */
     {
@@ -377,7 +348,6 @@ void client_process(int i)
         if(l <= 0)
         {
             task_put(i);
-            //close(cl);
             return;
         }
         if(_buf[l-1] != 0)
@@ -386,7 +356,6 @@ void client_process(int i)
             if(data == NULL || REQUESTBUF_SIZE < l)
             {
                 task_put(i);
-                //close(cl);
                 return;
             }
             memcpy(data->buf, _buf, l);    /* copy from stack to heap */
@@ -401,7 +370,6 @@ void client_process(int i)
         if(l < 0)
         {
             task_put(i);
-            //close(cl);
             return;
         }
         if(l == 0 && buf->len < REQUESTBUF_SIZE)
@@ -420,7 +388,6 @@ void client_process(int i)
 
 void server_sock_process(int fd)
 {
-    MARK
     int i;
 
     if((i = task_get()) < 0)
@@ -434,7 +401,6 @@ void server_sock_process(int fd)
         return;
     }
     task_socks[i] = cl;
-    fprintf(stderr, "new fd = %d\n", cl);
 
     int flags;
     flags = fcntl(cl,F_GETFL,0);
@@ -442,7 +408,6 @@ void server_sock_process(int fd)
     {
         perror("fcntl");
         task_put(i);
-        //close(cl);
         return;
     }
 
@@ -452,14 +417,12 @@ void server_sock_process(int fd)
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, cl, &ev) == -1) {
         perror("server_sock_process epoll_ctl");
         task_put(i);
-        //    close(cl);
         return;
     }
 }
 
 void sfd_process(int sfd)
 {
-    MARK
     struct signalfd_siginfo fdsi;
     ssize_t s;
     s = read(sfd, &fdsi, sizeof(struct signalfd_siginfo));
@@ -493,7 +456,6 @@ void sfd_process(int sfd)
 
 int main(int argc, char *argv[])
 {
-    MARK
     sigset_t mask;
     int sfd;
 
